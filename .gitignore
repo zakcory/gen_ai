@@ -1,1 +1,3 @@
-.ipynb_checkpoints/ n .gitignore
+.ipynb_checkpoints/
+.gitignore/
+./data
