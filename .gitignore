@@ -1,7 +1,6 @@
 .ipynb_checkpoints/
 .gitignore
-./data
-./*.pth
+data/
 checkpoints/
 images/
 
