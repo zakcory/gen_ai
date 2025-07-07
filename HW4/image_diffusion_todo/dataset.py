@@ -92,7 +92,7 @@ class AFHQDataModule(object):
     def __init__(
         self,
         root: str = "data",
-        batch_size: int = 32,
+        batch_size: int = 64,
         num_workers: int = 4,
         max_num_images_per_cat: int = 1000,
         image_resolution: int = 64,

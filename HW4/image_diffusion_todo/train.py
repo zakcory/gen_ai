@@ -89,6 +89,9 @@ def main(args):
     with tqdm(initial=step, total=config.train_num_steps) as pbar:
         while step < config.train_num_steps:
             if step % config.log_interval == 0:
+                print(f"-------------Stopping for Logging----------------")
+                if step != 0:
+                    print(f"-------------LOSS: {losses[-1]}-------------------")
                 ddpm.eval()
                 plt.plot(losses)
                 plt.savefig(f"{save_dir}/loss.png")

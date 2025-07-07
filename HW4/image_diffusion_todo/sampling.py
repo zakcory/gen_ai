@@ -27,7 +27,7 @@ def main(args):
         mode="linear",
     ).to(device)
 
-    total_num_samples = 500
+    total_num_samples = 1500
     num_batches = int(np.ceil(total_num_samples / args.batch_size))
 
     for i in range(num_batches):

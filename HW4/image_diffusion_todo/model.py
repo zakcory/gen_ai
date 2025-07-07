@@ -17,9 +17,23 @@ class DiffusionModule(nn.Module):
         ######## TODO ########
         # DO NOT change the code outside this part.
         # compute noise matching loss.
+
         B = x0.shape[0]
-        timestep = self.var_scheduler.uniform_sample_t(B, self.device)        
-        loss = x0.mean()
+        timestep = self.var_scheduler.uniform_sample_t(B, self.device) 
+
+        # sample noise
+        if noise is None:
+            noise = torch.randn_like(x0)
+
+        # diffuse
+        x_t, epsilon = self.var_scheduler.add_noise(x0, timestep, noise)
+
+        # predict noise
+        noise_pred = self.network(x_t, timestep, class_label)
+
+        # compute loss
+        loss = F.mse_loss(noise_pred, epsilon)
+
         ######################
         return loss
     
@@ -51,7 +65,7 @@ class DiffusionModule(nn.Module):
             # create a tensor of shape (2*batch_size,) where the first half is filled with zeros (i.e., null condition).
             assert class_label is not None
             assert len(class_label) == batch_size, f"len(class_label) != batch_size. {len(class_label)} != {batch_size}"
-            raise NotImplementedError("TODO")
+            class_label = torch.cat([torch.zeros_like(class_label), class_label], dim=0)
             #######################
 
         traj = [x_T]
@@ -60,13 +74,26 @@ class DiffusionModule(nn.Module):
             if do_classifier_free_guidance:
                 ######## TODO ########
                 # Assignment 2. Implement the classifier-free guidance.
-                raise NotImplementedError("TODO")
+
+                # duplicate the current sample and timestep
+                x_in = torch.cat([x_t, x_t], dim=0)                       
+
+                # predict noise for both unconditional and conditional batches
+                noise_pred_all = self.network(
+                    x_in,
+                    timestep=t.to(self.device),
+                    class_label=class_label
+                )
+
+                # split and apply guidance
+                noise_pred_uncond, noise_pred_cond = noise_pred_all.chunk(2, dim=0)
+                noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
                 #######################
             else:
                 noise_pred = self.network(
                     x_t,
                     timestep=t.to(self.device),
-                    class_label=class_label,
+                    class_label=None,
                 )
 
             x_t_prev = self.var_scheduler.step(x_t, t.to(self.device), noise_pred)

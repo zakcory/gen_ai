@@ -86,7 +86,17 @@ class DDPMScheduler(BaseScheduler):
         ######## TODO ########
         # DO NOT change the code outside this part.
         # Implement the DDPM reverse step.
-        sample_prev = None
+        alpha = self._get_teeth(self.alphas, torch.tensor([t], device=x_t.device))
+        alpha_bar = self._get_teeth(self.alphas_cumprod, torch.tensor([t], device=x_t.device))
+        sigma = self._get_teeth(self.sigmas, torch.tensor([t], device=x_t.device))
+
+        mean = (1 / alpha.sqrt()) * (x_t - ((1 - alpha) / (1 - alpha_bar).sqrt()) * eps_theta)
+
+        if t > 0:
+            noise = torch.randn_like(x_t)
+            sample_prev = mean + sigma * noise
+        else:
+            sample_prev = mean
         #######################
         
         return sample_prev
@@ -118,9 +128,14 @@ class DDPMScheduler(BaseScheduler):
             eps       = torch.randn(x_0.shape, device='cuda')
 
         ######## TODO ########
-        # DO NOT change the code outside this part.
-        # Implement the DDPM forward step.
-        x_t = None
+
+        # gather √ᾱ_t and √(1-ᾱ_t)
+        alpha_bar_t = self._get_teeth(self.alphas_cumprod, t)               # \bar{α}_t
+        sqrt_alpha_bar = torch.sqrt(alpha_bar_t)
+        sqrt_one_minus_bar = torch.sqrt(1.0 - alpha_bar_t)
+
+        # x_t = √ᾱ_t · x_0 + √(1-ᾱ_t) · ε
+        x_t = (sqrt_alpha_bar * x_0) + (sqrt_one_minus_bar * eps)
         #######################
 
         return x_t, eps
