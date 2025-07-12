@@ -66,6 +66,14 @@ class TimeLinear(nn.Module):
         return alpha * x
 
 
+def res_block(d):
+    return nn.Sequential(
+        nn.Linear(d, d),
+        nn.SiLU(inplace=True),
+        nn.Linear(d, d),
+    )
+
+
 class SimpleNet(nn.Module):
     def __init__(
         self, dim_in: int, dim_out: int, dim_hids: List[int], num_timesteps: int
@@ -84,8 +92,20 @@ class SimpleNet(nn.Module):
         ######## TODO ########
         # DO NOT change the code outside this part.
 
+        super().__init__()
+        layers = nn.ModuleList()
+        in_dim = dim_in
+        for h in dim_hids:
+            layers.append(TimeLinear(in_dim, h, num_timesteps))
+            layers.append(nn.SiLU(inplace=True))
+            layers.append(res_block(h))
+            in_dim = h
+        layers.append(nn.Linear(in_dim, dim_out))
+
+        self.layers = layers
+
         ######################
-        
+
     def forward(self, x: torch.Tensor, t: torch.Tensor):
         """
         (TODO) Implement the forward pass. This should output
@@ -97,6 +117,11 @@ class SimpleNet(nn.Module):
         """
         ######## TODO ########
         # DO NOT change the code outside this part.
-
+        for layer in self.layers:
+            # only TimeLinear needs t
+            if isinstance(layer, TimeLinear):
+                x = layer(x, t)
+            else:
+                x = layer(x)
         ######################
         return x

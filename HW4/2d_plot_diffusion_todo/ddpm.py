@@ -69,6 +69,8 @@ class DiffusionModule(nn.Module):
         # For image diffusion model.
         return getattr(self.network, "image_resolution", None)
 
+
+    @torch.no_grad()
     def q_sample(self, x0, t, noise=None):
         """
         sample x_t from q(x_t | x_0) of DDPM.
@@ -83,11 +85,15 @@ class DiffusionModule(nn.Module):
         if noise is None:
             noise = torch.randn_like(x0)
 
-        ######## TODO ########
-        # DO NOT change the code outside this part.
-        # Compute xt.
-        alphas_prod_t = extract(self.var_scheduler.alphas_cumprod, t, x0)
-        xt = x0
+        alpha_cumprod = self.var_scheduler.alphas_cumprod
+        sqrt_alphas_cumprod = alpha_cumprod.sqrt()
+        sqrt_one_minus_alphas_cumprod = (1.0 - alpha_cumprod).sqrt()
+
+        sqrt_alphas_cumprod_t = extract(sqrt_alphas_cumprod, t, x0)
+        sqrt_one_minus_alphas_cumprod_t = extract(sqrt_one_minus_alphas_cumprod, t, x0)
+
+        xt = sqrt_alphas_cumprod_t * x0 \
+             + sqrt_one_minus_alphas_cumprod_t * noise
 
         #######################
 
@@ -109,16 +115,40 @@ class DiffusionModule(nn.Module):
         # DO NOT change the code outside this part.
         # compute x_t_prev.
         if isinstance(t, int):
-            t = torch.tensor([t]).to(self.device)
-        eps_factor = (1 - extract(self.var_scheduler.alphas, t, xt)) / (
-            1 - extract(self.var_scheduler.alphas_cumprod, t, xt)
-        ).sqrt()
+            t = torch.tensor([t], device=self.device, dtype=torch.long)
+        elif isinstance(t, torch.Tensor) and t.ndim == 0:
+            t = t.unsqueeze(0).long().to(self.device)
         eps_theta = self.network(xt, t)
 
-        x_t_prev = xt
+        beta_t = extract(self.var_scheduler.betas, t, xt)
+        alpha_t = extract(self.var_scheduler.alphas, t, xt)
+        alpha_prod_t = extract(self.var_scheduler.alphas_cumprod, t, xt)
+        sqrt_one_minus_alphas_cumprod_t = torch.sqrt(1.0 - alpha_prod_t)
+        sqrt_recip_alphas = torch.sqrt( 1.0 / alpha_t )
+        t_prev = (t - 1).clamp(min=0) # Just in case we don't want to have t < 0 in one of the entries
+        alpha_prod_tm1 = extract(
+            self.var_scheduler.alphas_cumprod,
+            t_prev,
+            xt
+        )
+        model_mean = (
+                sqrt_recip_alphas *
+                (xt - (beta_t / sqrt_one_minus_alphas_cumprod_t) * eps_theta)
+        )
+        posterior_variance = beta_t * (1.0 - alpha_prod_tm1) / (1.0 - alpha_prod_t)
+        posterior_variance = posterior_variance.clamp(min=1e-20)
 
-        #######################
+
+        mask = (t > 0).view(-1, *[1] * (xt.ndim - 1)) # Just for looking where t == 0 as in previous implementation
+        x_t_prev = torch.where(
+            mask,
+            model_mean + torch.sqrt(posterior_variance) * torch.randn_like(xt),
+            model_mean
+        )
+
+        ######################
         return x_t_prev
+
 
     @torch.no_grad()
     def p_sample_loop(self, shape):
@@ -133,73 +163,87 @@ class DiffusionModule(nn.Module):
         ######## TODO ########
         # DO NOT change the code outside this part.
         # sample x0 based on Algorithm 2 of DDPM paper.
-        x0_pred = torch.zeros(shape).to(self.device)
 
+        xt = torch.randn(shape, device=self.device)
+        for t in self.var_scheduler.timesteps.to(self.device): # Already reversed
+            xt = self.p_sample(xt, t)
+        x0_pred = xt
         ######################
         return x0_pred
 
     @torch.no_grad()
     def ddim_p_sample(self, xt, t, t_prev, eta=0.0):
         """
-        One step denoising function of DDIM: $x_t{\tau_i}$ -> $x_{\tau{i-1}}$.
-
-        Input:
-            xt (`torch.Tensor`): noisy data at timestep $\tau_i$.
-            t (`torch.Tensor`): current timestep (=\tau_i)
-            t_prev (`torch.Tensor`): next timestep in a reverse process (=\tau_{i-1})
-            eta (float): correspond to η in DDIM which controls the stochasticity of a reverse process.
-        Output:
-           x_t_prev (`torch.Tensor`): one step denoised sample. (= $x_{\tau_{i-1}}$)
+        One step denoising function of DDIM: x_t (τ_i) -> x_{τ_{i-1}}
+        Returns x_t_prev.
         """
-        ######## TODO ########
-        # NOTE:
-        # DO NOT change the code outside this part.
-        # compute x_t_prev based on ddim reverse process.
+        if isinstance(t, int):
+            t = torch.tensor([t], device=self.device, dtype=torch.long)
+        elif isinstance(t, torch.Tensor) and t.ndim == 0:
+            t = t.unsqueeze(0)
         alpha_prod_t = extract(self.var_scheduler.alphas_cumprod, t, xt)
-        if t_prev >= 0:
-            alpha_prod_t_prev = extract(self.var_scheduler.alphas_cumprod, t_prev, xt)
+        alpha_prod_t_prev = (
+            extract(self.var_scheduler.alphas_cumprod, t_prev, xt)
+            if (t_prev >= 0).all() else
+            torch.ones_like(alpha_prod_t)
+        )
+
+        eps_theta = self.network(xt, t)
+
+        x0_pred = (xt - torch.sqrt(1 - alpha_prod_t) * eps_theta) / torch.sqrt(alpha_prod_t)
+
+        sigma_t = (
+                eta
+                * torch.sqrt((1 - alpha_prod_t_prev) / (1 - alpha_prod_t))
+                * torch.sqrt(1 - alpha_prod_t / alpha_prod_t_prev)
+        )
+
+        dir_coeff = torch.sqrt(
+            torch.clamp(1 - alpha_prod_t_prev - sigma_t ** 2, min=0.0)
+        )
+        dir_xt = dir_coeff * eps_theta
+
+        model_mean = torch.sqrt(alpha_prod_t_prev) * x0_pred + dir_xt
+
+        if eta > 0.0:
+            noise = torch.randn_like(xt)
+            x_t_prev = model_mean + sigma_t * noise
         else:
-            alpha_prod_t_prev = torch.ones_like(alpha_prod_t)
+            x_t_prev = model_mean
 
-        x_t_prev = xt
-
-        ######################
         return x_t_prev
 
     @torch.no_grad()
-    def ddim_p_sample_loop(self, shape, num_inference_timesteps=50, eta=0.0):
+    def ddim_p_sample_loop(self, shape, num_inference_timesteps: int = 50, eta: float = 0.0):
         """
-        The loop of the reverse process of DDIM.
+        DDIM reverse loop (T -> 0).
 
-        Input:
-            shape (`Tuple`): The shape of output. e.g., (num particles, 2)
-            num_inference_timesteps (`int`): the number of timesteps in the reverse process.
-            eta (`float`): correspond to η in DDIM which controls the stochasticity of a reverse process.
-        Output:
-            x0_pred (`torch.Tensor`): The final denoised output through the DDPM reverse process.
+        Args:
+            shape (Tuple[int]): output shape, e.g. (batch, C, H, W) or (N, 2).
+            num_inference_timesteps (int): how many DDIM steps to take.
+            eta (float): stochasticity coefficient (0 ⇒ deterministic).
+
+        Returns:
+            x0_pred (torch.Tensor): model’s reconstruction of x_0.
         """
-        ######## TODO ########
-        # NOTE: 
-        # DO NOT change the code outside this part.
-        # sample x0 based on Algorithm 2 of DDPM paper.
+        # ---------- prepare the DDIM time-schedule ----------
         step_ratio = self.var_scheduler.num_train_timesteps // num_inference_timesteps
         timesteps = (
             (np.arange(0, num_inference_timesteps) * step_ratio)
             .round()[::-1]
-            .copy()
             .astype(np.int64)
         )
-        timesteps = torch.from_numpy(timesteps)
+        timesteps = torch.from_numpy(timesteps).long()
         prev_timesteps = timesteps - step_ratio
 
-        xt = torch.zeros(shape).to(self.device)
+        xt = torch.randn(shape, device=self.device)
+
         for t, t_prev in zip(timesteps, prev_timesteps):
-            pass
+            t_tensor = torch.full((shape[0],), t, device=self.device, dtype=torch.long)
+            t_prev_tensor = torch.full((shape[0],), t_prev, device=self.device, dtype=torch.long)
+            xt = self.ddim_p_sample(xt, t_tensor, t_prev_tensor, eta=eta)
 
         x0_pred = xt
-
-        ######################
-
         return x0_pred
 
     def compute_loss(self, x0):
@@ -220,9 +264,11 @@ class DiffusionModule(nn.Module):
             .to(x0.device)
             .long()
         )
+        noise = torch.randn_like(x0)
+        x_t = self.q_sample(x0, t, noise)
 
-        loss = x0.mean()
-
+        eps_hat = self.network(x_t, t)
+        loss = F.mse_loss(eps_hat, noise)
         ######################
         return loss
 
